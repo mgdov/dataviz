@@ -1,0 +1,56 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: dataviz-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-dataviz}
+      POSTGRES_USER: ${POSTGRES_USER:-dataviz}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dataviz}
+    ports:
+      - "5433:5432"
+    volumes:
+      - dataviz_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-dataviz} -d ${POSTGRES_DB:-dataviz}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  api:
+    build:
+      context: ./backend/DataViz.Api
+      dockerfile: Dockerfile
+    container_name: dataviz-api
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ConnectionStrings__DefaultConnection: "Host=db;Port=5432;Database=${POSTGRES_DB:-dataviz};Username=${POSTGRES_USER:-dataviz};Password=${POSTGRES_PASSWORD:-dataviz}"
+      Jwt__Issuer: ${JWT_ISSUER:-DataViz}
+      Jwt__Audience: ${JWT_AUDIENCE:-DataViz.Web}
+      Jwt__Key: ${JWT_KEY:-CHANGE_ME_TO_A_LONG_RANDOM_SECRET_AT_LEAST_32_BYTES}
+      Jwt__ExpireMinutes: ${JWT_EXPIRE_MINUTES:-480}
+      Cors__Origins: ${CORS_ORIGINS:-http://localhost:3000}
+    ports:
+      - "5080:8080"
+
+  web:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_BASE: ${NEXT_PUBLIC_API_BASE:-http://localhost:5080}
+    container_name: dataviz-web
+    restart: unless-stopped
+    depends_on:
+      - api
+    environment:
+      NEXT_PUBLIC_API_BASE: ${NEXT_PUBLIC_API_BASE:-http://localhost:5080}
+    ports:
+      - "3000:3000"
+
+volumes:
+  dataviz_pgdata:
