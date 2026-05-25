@@ -1,3 +1,14 @@
+/** Роли пользователя, выдаваемые бэкендом в claim "role". */
+export type UserRole = "user" | "admin";
+
+export type User = {
+  id: number;
+  name: string;
+  email: string;
+  role: UserRole;
+  createdAt: string;
+};
+
 export type Category = {
   id: number;
   name: string;
@@ -72,3 +83,13 @@ export type SalesDashboard = {
   regionCategory: RegionCategoryPoint[];
   topProducts: TopProduct[];
 };
+
+/** Набор регионов, отображаемых в UI и поддерживаемых бэкендом. */
+export const REGIONS: ReadonlyArray<string> = [
+  "MSK",
+  "SPB",
+  "NSK",
+  "EKB",
+  "KZN",
+  "RND",
+];

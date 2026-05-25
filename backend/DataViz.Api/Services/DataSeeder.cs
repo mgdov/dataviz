@@ -1,4 +1,5 @@
 using DataViz.Api.Data;
+using DataViz.Api.Infrastructure;
 using DataViz.Api.Models;
 using Microsoft.EntityFrameworkCore;
 
@@ -76,7 +77,7 @@ public static class DataSeeder
             Name = "Demo",
             Email = "demo@example.com",
             PasswordHash = BCrypt.Net.BCrypt.HashPassword("demo12345"),
-            Role = "admin",
+            Role = UserRoles.Admin,
             CreatedAt = DateTime.UtcNow,
         };
         ctx.Users.Add(demoUser);

@@ -1,5 +1,6 @@
 using DataViz.Api.Data;
 using DataViz.Api.Dtos;
+using DataViz.Api.Infrastructure;
 using DataViz.Api.Models;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -7,63 +8,93 @@ using Microsoft.EntityFrameworkCore;
 
 namespace DataViz.Api.Controllers;
 
+/// <summary>CRUD категорий товаров. Чтение — публично, запись — только админам.</summary>
 [ApiController]
 [Route("api/categories")]
-public class CategoriesController : ControllerBase
+[Produces("application/json")]
+public sealed class CategoriesController : ControllerBase
 {
     private readonly ApplicationDbContext _ctx;
     public CategoriesController(ApplicationDbContext ctx) => _ctx = ctx;
 
+    /// <summary>Возвращает все категории, отсортированные по имени.</summary>
     [HttpGet]
-    public async Task<ActionResult<IEnumerable<CategoryDto>>> List() =>
+    [ProducesResponseType(typeof(IEnumerable<CategoryDto>), StatusCodes.Status200OK)]
+    public async Task<ActionResult<IEnumerable<CategoryDto>>> List(CancellationToken ct) =>
         await _ctx.Categories
+            .AsNoTracking()
             .OrderBy(c => c.Name)
             .Select(c => new CategoryDto(c.Id, c.Name, c.Description))
-            .ToListAsync();
+            .ToListAsync(ct);
 
+    /// <summary>Возвращает одну категорию по идентификатору.</summary>
     [HttpGet("{id:int}")]
-    public async Task<ActionResult<CategoryDto>> GetOne(int id)
+    [ProducesResponseType(typeof(CategoryDto), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<ActionResult<CategoryDto>> GetOne(int id, CancellationToken ct)
     {
-        var c = await _ctx.Categories.FindAsync(id);
+        var c = await _ctx.Categories.AsNoTracking().FirstOrDefaultAsync(x => x.Id == id, ct);
         return c is null ? NotFound() : new CategoryDto(c.Id, c.Name, c.Description);
     }
 
-    [Authorize(Roles = "admin")]
+    /// <summary>Создаёт новую категорию. Требует роль admin.</summary>
+    [Authorize(Policy = AuthorizationPolicies.AdminOnly)]
     [HttpPost]
-    public async Task<ActionResult<CategoryDto>> Create([FromBody] CategoryCreateDto dto)
+    [ProducesResponseType(typeof(CategoryDto), StatusCodes.Status201Created)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status409Conflict)]
+    public async Task<ActionResult<CategoryDto>> Create([FromBody] CategoryCreateDto dto, CancellationToken ct)
     {
         var name = dto.Name.Trim();
-        if (await _ctx.Categories.AnyAsync(c => c.Name == name))
-            return Conflict(new { error = "Category already exists" });
+        if (await _ctx.Categories.AnyAsync(c => c.Name == name, ct))
+            return Conflict(new ProblemDetails
+            {
+                Title = "Category already exists",
+                Status = StatusCodes.Status409Conflict,
+            });
 
-        var c = new Category { Name = name, Description = dto.Description };
-        _ctx.Categories.Add(c);
-        await _ctx.SaveChangesAsync();
-        return CreatedAtAction(nameof(GetOne), new { id = c.Id },
-            new CategoryDto(c.Id, c.Name, c.Description));
+        var category = new Category { Name = name, Description = dto.Description?.Trim() };
+        _ctx.Categories.Add(category);
+        await _ctx.SaveChangesAsync(ct);
+        return CreatedAtAction(nameof(GetOne), new { id = category.Id },
+            new CategoryDto(category.Id, category.Name, category.Description));
     }
 
-    [Authorize(Roles = "admin")]
+    /// <summary>Обновляет категорию. Требует роль admin.</summary>
+    [Authorize(Policy = AuthorizationPolicies.AdminOnly)]
     [HttpPut("{id:int}")]
-    public async Task<ActionResult<CategoryDto>> Update(int id, [FromBody] CategoryCreateDto dto)
+    [ProducesResponseType(typeof(CategoryDto), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<ActionResult<CategoryDto>> Update(int id, [FromBody] CategoryCreateDto dto, CancellationToken ct)
     {
-        var c = await _ctx.Categories.FindAsync(id);
+        var c = await _ctx.Categories.FindAsync(new object[] { id }, ct);
         if (c is null) return NotFound();
         c.Name = dto.Name.Trim();
-        c.Description = dto.Description;
-        await _ctx.SaveChangesAsync();
+        c.Description = dto.Description?.Trim();
+        await _ctx.SaveChangesAsync(ct);
         return new CategoryDto(c.Id, c.Name, c.Description);
     }
 
-    [Authorize(Roles = "admin")]
+    /// <summary>Удаляет пустую категорию. Требует роль admin.</summary>
+    [Authorize(Policy = AuthorizationPolicies.AdminOnly)]
     [HttpDelete("{id:int}")]
-    public async Task<IActionResult> Delete(int id)
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
+    public async Task<IActionResult> Delete(int id, CancellationToken ct)
     {
-        var c = await _ctx.Categories.Include(x => x.Products).FirstOrDefaultAsync(x => x.Id == id);
-        if (c is null) return NotFound();
-        if (c.Products.Any()) return BadRequest(new { error = "Category has products" });
-        _ctx.Categories.Remove(c);
-        await _ctx.SaveChangesAsync();
+        var category = await _ctx.Categories
+            .Include(x => x.Products)
+            .FirstOrDefaultAsync(x => x.Id == id, ct);
+        if (category is null) return NotFound();
+        if (category.Products.Any())
+            return BadRequest(new ProblemDetails
+            {
+                Title = "Category is not empty",
+                Detail = "Cannot delete a category that still has products.",
+                Status = StatusCodes.Status400BadRequest,
+            });
+        _ctx.Categories.Remove(category);
+        await _ctx.SaveChangesAsync(ct);
         return NoContent();
     }
 }

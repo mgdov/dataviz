@@ -1,183 +1,268 @@
+using System.Reflection;
 using System.Text;
+using System.Threading.RateLimiting;
 using DataViz.Api.Auth;
 using DataViz.Api.Data;
-using DataViz.Api.Services;
+using DataViz.Api.Infrastructure;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.Diagnostics.HealthChecks;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Diagnostics.HealthChecks;
+using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi.Models;
+
+const string CorsPolicy = "WebClient";
+const string AuthRateLimitPolicy = "auth-strict";
 
 var builder = WebApplication.CreateBuilder(args);
 
 // --- Configuration -----------------------------------------------------------
-
+// Переменные окружения имеют приоритет над appsettings, что удобно для Docker и Kubernetes.
 builder.Configuration.AddEnvironmentVariables();
 
+// --- Database ----------------------------------------------------------------
 var connectionString =
     builder.Configuration.GetConnectionString("DefaultConnection")
     ?? Environment.GetEnvironmentVariable("CONNECTION_STRING")
     ?? "Host=localhost;Port=5432;Database=dataviz;Username=dataviz;Password=dataviz";
 
-builder.Services.AddDbContext<ApplicationDbContext>(opt => opt.UseNpgsql(connectionString));
+builder.Services.AddDbContextPool<ApplicationDbContext>(opt =>
+{
+    opt.UseNpgsql(connectionString, npgsql =>
+    {
+        npgsql.EnableRetryOnFailure(maxRetryCount: 5, maxRetryDelay: TimeSpan.FromSeconds(10), errorCodesToAdd: null);
+        npgsql.CommandTimeout(30);
+    });
 
-builder.Services.Configure<JwtOptions>(builder.Configuration.GetSection("Jwt"));
+    if (builder.Environment.IsDevelopment())
+        opt.EnableDetailedErrors().EnableSensitiveDataLogging();
+});
+
+// --- JWT options & token service ---------------------------------------------
+builder.Services
+    .AddOptions<JwtOptions>()
+    .Bind(builder.Configuration.GetSection(JwtOptions.SectionName))
+    .ValidateDataAnnotations()
+    .Validate(
+        opt => !string.Equals(opt.Key,
+            "DEV_ONLY_INSECURE_KEY_PLEASE_OVERRIDE_VIA_ENV_32_BYTES_MIN",
+            StringComparison.Ordinal),
+        "Jwt:Key must be overridden — the bundled placeholder is not acceptable")
+    .ValidateOnStart();
+
 builder.Services.AddSingleton<IJwtTokenService, JwtTokenService>();
 
-// --- AuthN / AuthZ -----------------------------------------------------------
-
-var jwtSection = builder.Configuration.GetSection("Jwt");
-var jwtOptions = jwtSection.Get<JwtOptions>() ?? new JwtOptions();
-if (string.IsNullOrWhiteSpace(jwtOptions.Key))
-    jwtOptions.Key = "DEV_ONLY_INSECURE_KEY_PLEASE_OVERRIDE_VIA_ENV_32_BYTES_MIN";
-
+// --- Authentication / Authorization ------------------------------------------
 builder.Services
     .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>
     {
+        // Параметры подтягиваются из IOptionsMonitor<JwtOptions> чтобы избежать
+        // дублирования логики "взять секцию Jwt и накормить её JwtBearer".
+        options.MapInboundClaims = false;
         options.TokenValidationParameters = new TokenValidationParameters
         {
             ValidateIssuer = true,
             ValidateAudience = true,
             ValidateLifetime = true,
             ValidateIssuerSigningKey = true,
-            ValidIssuer = jwtOptions.Issuer,
-            ValidAudience = jwtOptions.Audience,
-            IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtOptions.Key)),
             ClockSkew = TimeSpan.FromSeconds(30),
+            RoleClaimType = System.Security.Claims.ClaimTypes.Role,
+        };
+        options.Events = new JwtBearerEvents
+        {
+            OnMessageReceived = ctx =>
+            {
+                var opt = ctx.HttpContext.RequestServices
+                    .GetRequiredService<IOptionsMonitor<JwtOptions>>().CurrentValue;
+                ctx.Options.TokenValidationParameters.ValidIssuer = opt.Issuer;
+                ctx.Options.TokenValidationParameters.ValidAudience = opt.Audience;
+                ctx.Options.TokenValidationParameters.IssuerSigningKey =
+                    new SymmetricSecurityKey(Encoding.UTF8.GetBytes(opt.Key));
+                return Task.CompletedTask;
+            },
         };
     });
 
-builder.Services.AddAuthorization();
+builder.Services.AddAuthorizationBuilder()
+    .AddPolicy(AuthorizationPolicies.AdminOnly,
+        policy => policy.RequireRole(UserRoles.Admin));
 
-// --- CORS for the Next.js frontend ------------------------------------------
+// --- CORS --------------------------------------------------------------------
+var corsOrigins = (builder.Configuration["Cors:Origins"]
+                   ?? Environment.GetEnvironmentVariable("CORS_ORIGINS")
+                   ?? "http://localhost:3000")
+    .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
-const string CorsPolicy = "WebClient";
-builder.Services.AddCors(o => o.AddPolicy(CorsPolicy, p =>
+builder.Services.AddCors(o => o.AddPolicy(CorsPolicy, p => p
+    .WithOrigins(corsOrigins)
+    .AllowAnyHeader()
+    .AllowAnyMethod()
+    .AllowCredentials()
+    .WithExposedHeaders("Location")));
+
+// --- Rate limiting -----------------------------------------------------------
+// Защита от bruteforce на /api/auth/* — 10 запросов в минуту с одного IP.
+builder.Services.AddRateLimiter(o =>
 {
-    var origins = builder.Configuration["Cors:Origins"]
-                  ?? Environment.GetEnvironmentVariable("CORS_ORIGINS")
-                  ?? "http://localhost:3000";
-    p.WithOrigins(origins.Split(',', StringSplitOptions.RemoveEmptyEntries))
-     .AllowAnyHeader()
-     .AllowAnyMethod()
-     .AllowCredentials();
-}));
+    o.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    o.AddPolicy(AuthRateLimitPolicy, ctx =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: ctx.Connection.RemoteIpAddress?.ToString() ?? "anonymous",
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 10,
+                Window = TimeSpan.FromMinutes(1),
+                QueueLimit = 0,
+                AutoReplenishment = true,
+            }));
+});
 
-// --- MVC / Swagger -----------------------------------------------------------
-
+// --- MVC + JSON + ProblemDetails --------------------------------------------
 builder.Services.AddControllers()
+    .ConfigureApiBehaviorOptions(o =>
+    {
+        // ASP.NET сам возвращает RFC 7807 для 400 при валидации модели — оставляем как есть.
+        o.SuppressMapClientErrors = false;
+    })
     .AddJsonOptions(opt =>
     {
         opt.JsonSerializerOptions.PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase;
+        opt.JsonSerializerOptions.DefaultIgnoreCondition =
+            System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull;
     });
 
+builder.Services.AddProblemDetails(o =>
+{
+    o.CustomizeProblemDetails = ctx =>
+    {
+        ctx.ProblemDetails.Extensions["traceId"] = ctx.HttpContext.TraceIdentifier;
+    };
+});
+
+builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
+
+// --- Health checks -----------------------------------------------------------
+builder.Services.AddHealthChecks()
+    .AddNpgSql(
+        connectionString,
+        name: "postgres",
+        failureStatus: HealthStatus.Unhealthy,
+        tags: new[] { "ready", "db" });
+
+// --- Swagger -----------------------------------------------------------------
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(c =>
 {
-    c.SwaggerDoc("v1", new OpenApiInfo { Title = "DataViz API", Version = "v1" });
+    c.SwaggerDoc("v1", new OpenApiInfo
+    {
+        Title = "DataViz API",
+        Version = "v1",
+        Description = "REST API для системы визуализации данных (курсовая работа).",
+    });
+
+    var xmlFile = $"{Assembly.GetExecutingAssembly().GetName().Name}.xml";
+    var xmlPath = Path.Combine(AppContext.BaseDirectory, xmlFile);
+    if (File.Exists(xmlPath))
+        c.IncludeXmlComments(xmlPath, includeControllerXmlComments: true);
+
     c.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
     {
         Description = "JWT Authorization. Example: \"Bearer {token}\"",
         Name = "Authorization",
         In = ParameterLocation.Header,
-        Type = SecuritySchemeType.ApiKey,
-        Scheme = "Bearer",
+        Type = SecuritySchemeType.Http,
+        Scheme = "bearer",
+        BearerFormat = "JWT",
     });
     c.AddSecurityRequirement(new OpenApiSecurityRequirement
     {
         {
             new OpenApiSecurityScheme
             {
-                Reference = new OpenApiReference { Type = ReferenceType.SecurityScheme, Id = "Bearer" },
+                Reference = new OpenApiReference
+                {
+                    Type = ReferenceType.SecurityScheme,
+                    Id = "Bearer",
+                },
             },
             Array.Empty<string>()
         },
     });
 });
 
-// --- Pipeline ----------------------------------------------------------------
-
+// --- Build pipeline ----------------------------------------------------------
 var app = builder.Build();
 
-using (var scope = app.Services.CreateScope())
+// Жёсткая валидация JWT-ключа в Production: лучше сразу упасть, чем работать с дев-ключом.
+if (app.Environment.IsProduction())
 {
-    var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
-    var logger = scope.ServiceProvider.GetRequiredService<ILogger<Program>>();
-
-    var maxRetries = 10;
-    for (var attempt = 1; attempt <= maxRetries; attempt++)
-    {
-        try
-        {
-            db.Database.Migrate();
-            break;
-        }
-        catch (Exception ex) when (attempt < maxRetries)
-        {
-            logger.LogWarning(ex, "Migration attempt {Attempt} failed, retrying...", attempt);
-            await Task.Delay(TimeSpan.FromSeconds(2 * attempt));
-        }
-    }
-
-    // Ensure a default admin user exists when the database has no admin.
-    if (!await db.Users.AnyAsync(u => u.Role == "admin"))
-    {
-        var adminEmail = builder.Configuration["Admin:Email"]
-                         ?? Environment.GetEnvironmentVariable("ADMIN_EMAIL")
-                         ?? "admin@example.com";
-        var adminPassword = builder.Configuration["Admin:Password"]
-                            ?? Environment.GetEnvironmentVariable("ADMIN_PASSWORD")
-                            ?? "admin12345";
-        var adminName = builder.Configuration["Admin:Name"]
-                        ?? Environment.GetEnvironmentVariable("ADMIN_NAME")
-                        ?? "Admin";
-
-        var existingUser = await db.Users.FirstOrDefaultAsync(u => u.Email == adminEmail);
-        if (existingUser is null)
-        {
-            var adminUser = new DataViz.Api.Models.User
-            {
-                Name = adminName,
-                Email = adminEmail,
-                PasswordHash = BCrypt.Net.BCrypt.HashPassword(adminPassword),
-                Role = "admin",
-                CreatedAt = DateTime.UtcNow,
-            };
-            db.Users.Add(adminUser);
-            await db.SaveChangesAsync();
-            logger.LogInformation("Created default admin user {Email}", adminEmail);
-            logger.LogInformation("Admin password: {Password}", adminPassword);
-        }
-        else
-        {
-            existingUser.Role = "admin";
-            existingUser.PasswordHash = BCrypt.Net.BCrypt.HashPassword(adminPassword);
-            await db.SaveChangesAsync();
-            logger.LogInformation("Upgraded existing user {Email} to admin", adminEmail);
-            logger.LogInformation("Admin password: {Password}", adminPassword);
-        }
-    }
-
-    // Only seed data when explicitly enabled via environment variable or configuration.
-    var seedEnabled = builder.Configuration.GetValue<bool>("SeedData", false)
-                      || Environment.GetEnvironmentVariable("SEED_DATA") == "true";
-    if (seedEnabled)
-    {
-        await DataSeeder.SeedAsync(db, logger);
-    }
-    else
-    {
-        logger.LogInformation("Data seeding skipped (SEED_DATA not set or SeedData=false)");
-    }
+    var jwt = app.Services.GetRequiredService<IOptions<JwtOptions>>().Value;
+    if (Encoding.UTF8.GetByteCount(jwt.Key) < 32)
+        throw new InvalidOperationException(
+            "Jwt:Key must be at least 32 bytes in Production. Set the JWT_KEY environment variable.");
 }
 
+app.UseExceptionHandler();
+app.UseStatusCodePages();
+
+if (app.Environment.IsDevelopment())
+{
+    app.UseDeveloperExceptionPage();
+}
+
+await DatabaseInitializer.InitializeAsync(app.Services, app.Configuration);
+
 app.UseSwagger();
-app.UseSwaggerUI(c => c.SwaggerEndpoint("/swagger/v1/swagger.json", "DataViz API v1"));
+app.UseSwaggerUI(c =>
+{
+    c.SwaggerEndpoint("/swagger/v1/swagger.json", "DataViz API v1");
+    c.RoutePrefix = "swagger";
+    c.DocumentTitle = "DataViz API";
+});
 
 app.UseCors(CorsPolicy);
+app.UseRateLimiter();
+
 app.UseAuthentication();
 app.UseAuthorization();
+
+// Health endpoints: /healthz — liveness (без БД), /readyz — readiness (с БД).
+app.MapHealthChecks("/healthz", new HealthCheckOptions
+{
+    Predicate = _ => false,
+    ResponseWriter = WriteHealthResponse,
+}).AllowAnonymous();
+
+app.MapHealthChecks("/readyz", new HealthCheckOptions
+{
+    Predicate = r => r.Tags.Contains("ready"),
+    ResponseWriter = WriteHealthResponse,
+}).AllowAnonymous();
 
 app.MapControllers();
 
 app.Run();
+
+static Task WriteHealthResponse(HttpContext ctx, HealthReport report)
+{
+    ctx.Response.ContentType = "application/json";
+    var payload = new
+    {
+        status = report.Status.ToString(),
+        totalDurationMs = report.TotalDuration.TotalMilliseconds,
+        checks = report.Entries.Select(e => new
+        {
+            name = e.Key,
+            status = e.Value.Status.ToString(),
+            durationMs = e.Value.Duration.TotalMilliseconds,
+            description = e.Value.Description,
+        }),
+    };
+    return ctx.Response.WriteAsJsonAsync(payload);
+}
+
+// Делаем тип Program доступным для интеграционных тестов через WebApplicationFactory<Program>.
+public partial class Program;
