@@ -38,15 +38,23 @@ export function NavBar() {
             <Link
               key={l.href}
               href={l.href}
-              className={`text-sm transition-colors ${
-                pathname?.startsWith(l.href)
+              className={`text-sm transition-colors ${pathname?.startsWith(l.href)
                   ? "text-white"
                   : "text-slate-400 hover:text-white"
-              }`}
+                }`}
             >
               {l.label}
             </Link>
           ))}
+          {user?.role === "admin" && (
+            <Link
+              href="/admin"
+              className={`text-sm transition-colors ${pathname?.startsWith("/admin") ? "text-white" : "text-slate-400 hover:text-white"
+                }`}
+            >
+              Админ
+            </Link>
+          )}
           <div className="flex items-center gap-3 border-l border-slate-800 pl-6">
             <span className="text-sm text-slate-400">{user.name}</span>
             <button

@@ -35,7 +35,7 @@ public class ProductsController : ControllerBase
             p.RegionCode, p.CategoryId, p.Category!.Name);
     }
 
-    [Authorize]
+    [Authorize(Roles = "admin")]
     [HttpPost]
     public async Task<ActionResult<ProductDto>> Create([FromBody] ProductCreateDto dto)
     {
@@ -58,7 +58,7 @@ public class ProductsController : ControllerBase
                 p.RegionCode, p.CategoryId, cat.Name));
     }
 
-    [Authorize]
+    [Authorize(Roles = "admin")]
     [HttpPut("{id:int}")]
     public async Task<ActionResult<ProductDto>> Update(int id, [FromBody] ProductCreateDto dto)
     {
@@ -79,7 +79,7 @@ public class ProductsController : ControllerBase
             p.RegionCode, p.CategoryId, cat.Name);
     }
 
-    [Authorize]
+    [Authorize(Roles = "admin")]
     [HttpDelete("{id:int}")]
     public async Task<IActionResult> Delete(int id)
     {

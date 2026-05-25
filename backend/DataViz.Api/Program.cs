@@ -119,7 +119,56 @@ using (var scope = app.Services.CreateScope())
         }
     }
 
-    await DataSeeder.SeedAsync(db, logger);
+    // Ensure a default admin user exists when the database has no admin.
+    if (!await db.Users.AnyAsync(u => u.Role == "admin"))
+    {
+        var adminEmail = builder.Configuration["Admin:Email"]
+                         ?? Environment.GetEnvironmentVariable("ADMIN_EMAIL")
+                         ?? "admin@example.com";
+        var adminPassword = builder.Configuration["Admin:Password"]
+                            ?? Environment.GetEnvironmentVariable("ADMIN_PASSWORD")
+                            ?? "admin12345";
+        var adminName = builder.Configuration["Admin:Name"]
+                        ?? Environment.GetEnvironmentVariable("ADMIN_NAME")
+                        ?? "Admin";
+
+        var existingUser = await db.Users.FirstOrDefaultAsync(u => u.Email == adminEmail);
+        if (existingUser is null)
+        {
+            var adminUser = new DataViz.Api.Models.User
+            {
+                Name = adminName,
+                Email = adminEmail,
+                PasswordHash = BCrypt.Net.BCrypt.HashPassword(adminPassword),
+                Role = "admin",
+                CreatedAt = DateTime.UtcNow,
+            };
+            db.Users.Add(adminUser);
+            await db.SaveChangesAsync();
+            logger.LogInformation("Created default admin user {Email}", adminEmail);
+            logger.LogInformation("Admin password: {Password}", adminPassword);
+        }
+        else
+        {
+            existingUser.Role = "admin";
+            existingUser.PasswordHash = BCrypt.Net.BCrypt.HashPassword(adminPassword);
+            await db.SaveChangesAsync();
+            logger.LogInformation("Upgraded existing user {Email} to admin", adminEmail);
+            logger.LogInformation("Admin password: {Password}", adminPassword);
+        }
+    }
+
+    // Only seed data when explicitly enabled via environment variable or configuration.
+    var seedEnabled = builder.Configuration.GetValue<bool>("SeedData", false)
+                      || Environment.GetEnvironmentVariable("SEED_DATA") == "true";
+    if (seedEnabled)
+    {
+        await DataSeeder.SeedAsync(db, logger);
+    }
+    else
+    {
+        logger.LogInformation("Data seeding skipped (SEED_DATA not set or SeedData=false)");
+    }
 }
 
 app.UseSwagger();

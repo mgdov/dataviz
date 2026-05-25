@@ -28,7 +28,7 @@ public class CategoriesController : ControllerBase
         return c is null ? NotFound() : new CategoryDto(c.Id, c.Name, c.Description);
     }
 
-    [Authorize]
+    [Authorize(Roles = "admin")]
     [HttpPost]
     public async Task<ActionResult<CategoryDto>> Create([FromBody] CategoryCreateDto dto)
     {
@@ -43,7 +43,7 @@ public class CategoriesController : ControllerBase
             new CategoryDto(c.Id, c.Name, c.Description));
     }
 
-    [Authorize]
+    [Authorize(Roles = "admin")]
     [HttpPut("{id:int}")]
     public async Task<ActionResult<CategoryDto>> Update(int id, [FromBody] CategoryCreateDto dto)
     {
@@ -55,7 +55,7 @@ public class CategoriesController : ControllerBase
         return new CategoryDto(c.Id, c.Name, c.Description);
     }
 
-    [Authorize]
+    [Authorize(Roles = "admin")]
     [HttpDelete("{id:int}")]
     public async Task<IActionResult> Delete(int id)
     {
