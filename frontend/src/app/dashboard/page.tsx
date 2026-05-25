@@ -8,11 +8,10 @@ import { Plot } from "@/components/Plot";
 import { swrFetcher } from "@/lib/api";
 import {
   Category,
+  REGIONS,
   RegionCategoryPoint,
   SalesDashboard,
 } from "@/lib/types";
-
-const REGIONS = ["MSK", "SPB", "NSK", "EKB", "KZN", "RND"];
 
 const fmtRub = (n: number) =>
   new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 }).format(n) + " ₽";
@@ -44,6 +43,10 @@ function DashboardInner() {
   const [regions, setRegions] = useState<string[]>([]);
   const [categoryId, setCategoryId] = useState<number | "">("");
 
+  // Не пускаем запрос, если диапазон некорректен — экономим раунд-трип
+  // и показываем явный бэннер пользователю.
+  const dateRangeInvalid = Boolean(from && to && from > to);
+
   const params = new URLSearchParams();
   if (from) params.set("from", from);
   if (to) params.set("to", to);
@@ -55,7 +58,7 @@ function DashboardInner() {
     swrFetcher,
   );
   const { data, error, isLoading } = useSWR<SalesDashboard>(
-    `/api/dashboard/sales?${params.toString()}`,
+    dateRangeInvalid ? null : `/api/dashboard/sales?${params.toString()}`,
     swrFetcher,
     { keepPreviousData: true },
   );
@@ -79,19 +82,23 @@ function DashboardInner() {
       <section className="rounded-xl border border-slate-800 bg-slate-900 p-5">
         <div className="grid grid-cols-1 gap-4 md:grid-cols-4">
           <div>
-            <label className="mb-1 block text-xs uppercase text-slate-400">с</label>
+            <label htmlFor="date-from" className="mb-1 block text-xs uppercase text-slate-400">с</label>
             <input
+              id="date-from"
               type="date"
               value={from}
+              max={to || undefined}
               onChange={(e) => setFrom(e.target.value)}
               className="w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-white"
             />
           </div>
           <div>
-            <label className="mb-1 block text-xs uppercase text-slate-400">по</label>
+            <label htmlFor="date-to" className="mb-1 block text-xs uppercase text-slate-400">по</label>
             <input
+              id="date-to"
               type="date"
               value={to}
+              min={from || undefined}
               onChange={(e) => setTo(e.target.value)}
               className="w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-white"
             />
@@ -142,8 +149,19 @@ function DashboardInner() {
         </div>
       </section>
 
+      {dateRangeInvalid && (
+        <div
+          role="alert"
+          className="rounded-md border border-amber-900 bg-amber-950 px-4 py-3 text-sm text-amber-200"
+        >
+          Начала периода позже конца — поправьте диапазон дат.
+        </div>
+      )}
       {error && (
-        <div className="rounded-md border border-red-900 bg-red-950 px-4 py-3 text-sm text-red-300">
+        <div
+          role="alert"
+          className="rounded-md border border-red-900 bg-red-950 px-4 py-3 text-sm text-red-300"
+        >
           Ошибка загрузки данных: {(error as Error).message}
         </div>
       )}

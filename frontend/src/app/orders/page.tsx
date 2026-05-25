@@ -4,7 +4,7 @@ import { FormEvent, useMemo, useState } from "react";
 import useSWR, { useSWRConfig } from "swr";
 import { AuthGuard } from "@/components/AuthGuard";
 import { api, swrFetcher } from "@/lib/api";
-import { Order, Product } from "@/lib/types";
+import { Order, Product, REGIONS } from "@/lib/types";
 
 const fmtRub = (n: number) =>
   new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 }).format(n) + " ₽";
@@ -29,7 +29,7 @@ function OrdersInner() {
   const { data, isLoading } = useSWR<Order[]>("/api/orders", swrFetcher);
   const { data: products } = useSWR<Product[]>("/api/products", swrFetcher);
   const { mutate } = useSWRConfig();
-  const [regionCode, setRegionCode] = useState("MOW");
+  const [regionCode, setRegionCode] = useState<string>(REGIONS[0] ?? "MSK");
   const [items, setItems] = useState<OrderItemInput[]>([
     { productId: 0, quantity: 1 },
   ]);
@@ -120,13 +120,20 @@ function OrdersInner() {
           <h2 className="mb-4 text-lg font-semibold text-white">Создать заказ</h2>
           <form onSubmit={submit} className="space-y-4">
             <div>
-              <label className="mb-2 block text-sm text-slate-300">Регион</label>
-              <input
+              <label htmlFor="order-region" className="mb-2 block text-sm text-slate-300">Регион</label>
+              <select
+                id="order-region"
                 value={regionCode}
                 onChange={(e) => setRegionCode(e.target.value)}
                 required
                 className="w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-white focus:border-blue-500 focus:outline-none"
-              />
+              >
+                {REGIONS.map((r) => (
+                  <option key={r} value={r}>
+                    {r}
+                  </option>
+                ))}
+              </select>
             </div>
 
             <div className="space-y-3">

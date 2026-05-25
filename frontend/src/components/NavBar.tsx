@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useRouter, usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
-import { clearAuth, getUser, User } from "@/lib/api";
+import { clearAuth, getUser, subscribeAuth, type User } from "@/lib/api";
 
 const links = [
   { href: "/dashboard", label: "Дашборд" },
@@ -18,6 +18,7 @@ export function NavBar() {
 
   useEffect(() => {
     setUser(getUser());
+    return subscribeAuth(() => setUser(getUser()));
   }, [pathname]);
 
   if (!user) return null;
@@ -27,8 +28,16 @@ export function NavBar() {
     router.push("/login");
   };
 
+  const isActive = (href: string) =>
+    pathname === href || pathname?.startsWith(`${href}/`);
+
+  const linkClass = (href: string) =>
+    `text-sm transition-colors ${
+      isActive(href) ? "text-white" : "text-slate-400 hover:text-white"
+    }`;
+
   return (
-    <nav className="border-b border-slate-800 bg-slate-950">
+    <nav className="border-b border-slate-800 bg-slate-950" aria-label="Основная навигация">
       <div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-3">
         <Link href="/dashboard" className="text-lg font-semibold text-white">
           DataViz
@@ -38,26 +47,27 @@ export function NavBar() {
             <Link
               key={l.href}
               href={l.href}
-              className={`text-sm transition-colors ${pathname?.startsWith(l.href)
-                  ? "text-white"
-                  : "text-slate-400 hover:text-white"
-                }`}
+              aria-current={isActive(l.href) ? "page" : undefined}
+              className={linkClass(l.href)}
             >
               {l.label}
             </Link>
           ))}
-          {user?.role === "admin" && (
+          {user.role === "admin" && (
             <Link
               href="/admin"
-              className={`text-sm transition-colors ${pathname?.startsWith("/admin") ? "text-white" : "text-slate-400 hover:text-white"
-                }`}
+              aria-current={isActive("/admin") ? "page" : undefined}
+              className={linkClass("/admin")}
             >
               Админ
             </Link>
           )}
           <div className="flex items-center gap-3 border-l border-slate-800 pl-6">
-            <span className="text-sm text-slate-400">{user.name}</span>
+            <span className="text-sm text-slate-400" title={user.email}>
+              {user.name}
+            </span>
             <button
+              type="button"
               onClick={logout}
               className="rounded-md border border-slate-700 px-3 py-1 text-sm text-slate-200 transition-colors hover:bg-slate-800"
             >

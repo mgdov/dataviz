@@ -31,11 +31,20 @@ services:
       ConnectionStrings__DefaultConnection: "Host=db;Port=5432;Database=${POSTGRES_DB:-dataviz};Username=${POSTGRES_USER:-dataviz};Password=${POSTGRES_PASSWORD:-dataviz}"
       Jwt__Issuer: ${JWT_ISSUER:-DataViz}
       Jwt__Audience: ${JWT_AUDIENCE:-DataViz.Web}
-      Jwt__Key: ${JWT_KEY:-CHANGE_ME_TO_A_LONG_RANDOM_SECRET_AT_LEAST_32_BYTES}
+      Jwt__Key: ${JWT_KEY:?JWT_KEY is required (>=32 bytes) — see .env.example}
       Jwt__ExpireMinutes: ${JWT_EXPIRE_MINUTES:-480}
       Cors__Origins: ${CORS_ORIGINS:-http://localhost:3000}
+      SeedData: ${SEED_DATA:-true}
+      AdminEmail: ${ADMIN_EMAIL:-admin@example.com}
+      AdminPassword: ${ADMIN_PASSWORD:-}
     ports:
       - "5080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
 
   web:
     build:
@@ -46,7 +55,8 @@ services:
     container_name: dataviz-web
     restart: unless-stopped
     depends_on:
-      - api
+      api:
+        condition: service_healthy
     environment:
       NEXT_PUBLIC_API_BASE: ${NEXT_PUBLIC_API_BASE:-http://localhost:5080}
     ports:
